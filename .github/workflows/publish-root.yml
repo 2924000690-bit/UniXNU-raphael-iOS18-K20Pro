@@ -1,0 +1,71 @@
+name: publish-root-asset
+
+# Actions artifacts live on Azure blob storage, which is throttled hard from
+# some networks (~0.5 MB/s). Release assets come from the fast GitHub CDN.
+# This job re-publishes an already built ios18-root artifact as release
+# assets, split into <2 GiB parts because a single asset cannot exceed 2 GiB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: run id that holds the ios18-root artifact
+        required: false
+        default: "44993398180"
+      artifact:
+        description: artifact name to fetch
+        required: false
+        default: "ios18-root"
+      tag:
+        description: release tag to publish under
+        required: false
+        default: "ios18-root-gpu"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          gh run download "${{ inputs.run_id }}" -n "${{ inputs.artifact }}" \
+            -D out --repo "${{ github.repository }}"
+          ls -l out
+          sha256sum out/* || true
+
+      - name: Split into release-sized parts
+        run: |
+          set -euo pipefail
+          mkdir -p parts
+          cd out
+          for f in *; do
+            split -b 1800M -d -a 2 "$f" "../parts/${f}.part"
+          done
+          cd ../parts
+          ls -l
+          sha256sum * | tee SHA256SUMS.txt
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "${{ github.repository }}" \
+              --title "$TAG" --notes "iOS 18 root image (Chlorophyll/GPU staged), split parts"
+          for f in parts/*; do
+            gh release upload "$TAG" "$f" --repo "${{ github.repository }}" --clobber
+          done
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets \
+            --jq '.assets[] | "\(.name) \(.size)"'
