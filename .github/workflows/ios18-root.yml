@@ -19,6 +19,14 @@ on:
         description: Release tag or directory URL with the GPU firmware (empty = skip)
         required: false
         default: ""
+      ssh_pubkey:
+        description: Public key written to /private/var/root/.ssh/authorized_keys (key-only dropbear on 192.168.7.2)
+        required: false
+        default: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICruKtyLDBaxmuaXM2Txd5ntWdR+U9y/8s/LmDl4kEL+ raphael-ios18-doubao"
+      wifi_firmware_url:
+        description: Release tag whose assets hold the Wi-Fi firmware (tar.gz or single files; empty = skip)
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -164,6 +172,53 @@ jobs:
           sudo umount "$MNT"
           sudo losetup -d "$DEV"
 
+      - name: Install the debug ssh key and the Wi-Fi firmware into the root
+        if: always() && (inputs.ssh_pubkey != '' || inputs.wifi_firmware_url != '')
+        run: |
+          set -euo pipefail
+          RAW=$(find -L research -name 'root.img' -type f | head -1)
+          if [ -z "$RAW" ]; then
+            SIMG=$(find -L research -name '*.simg' -type f | head -1)
+            [ -n "$SIMG" ] || { echo "no root image in research/"; exit 1; }
+            RAW="${SIMG%.simg}.img"
+            python3 tools/renegade/simg2img.py "$SIMG" "$RAW"
+            rm -f "$SIMG"
+          fi
+          [ -f "$RAW" ] || { echo "no root.img"; exit 1; }
+          MNT=/mnt/renegade-research/wififw-mnt
+          mkdir -p "$MNT"
+          sudo modprobe hfsplus
+          DEV=$(sudo losetup --find --show "$RAW")
+          sudo mount -t hfsplus -o rw,force "$DEV" "$MNT"
+          if [ -n "${{ inputs.ssh_pubkey }}" ]; then
+            sudo mkdir -p "$MNT/private/var/root/.ssh"
+            printf '%s\n' "${{ inputs.ssh_pubkey }}" > /tmp/authorized_keys
+            sudo install -m 600 -o 0 -g 0 /tmp/authorized_keys "$MNT/private/var/root/.ssh/authorized_keys"
+            sudo chmod 700 "$MNT/private/var/root/.ssh"
+            echo "== authorized_keys installed"
+            sudo cat "$MNT/private/var/root/.ssh/authorized_keys"
+          fi
+          if [ -n "${{ inputs.wifi_firmware_url }}" ]; then
+            mkdir -p /tmp/wififw
+            gh release download "${{ inputs.wifi_firmware_url }}" --repo "${{ github.repository }}" -D /tmp/wififw --clobber
+            ls -l /tmp/wififw
+            sudo mkdir -p "$MNT/usr/local/share/firmware/wifi"
+            for a in /tmp/wififw/*; do
+              case "$a" in
+                *.tar.gz|*.tgz) sudo tar -xzf "$a" -C "$MNT/usr/local/share/firmware/wifi" ;;
+                *.tar)         sudo tar -xf  "$a" -C "$MNT/usr/local/share/firmware/wifi" ;;
+                *)             sudo cp "$a" "$MNT/usr/local/share/firmware/wifi/" ;;
+              esac
+            done
+            sudo chown -R 0:0 "$MNT/usr/local/share/firmware/wifi"
+            sudo chmod 644 "$MNT/usr/local/share/firmware/wifi"/* || true
+            echo "== wifi firmware"
+            ls -l "$MNT/usr/local/share/firmware/wifi" | head -40
+          fi
+          sync
+          sudo umount "$MNT"
+          sudo losetup -d "$DEV"
+
       - name: Install Chlorophyll's bgmtl into the image
         if: always()
         run: |
@@ -222,6 +277,7 @@ jobs:
           echo "== authorized_keys"; cat /mnt/check/private/var/root/.ssh/authorized_keys 2>/dev/null || true
           echo "== dropbear"; ls -l /mnt/check/usr/local/bin/dropbear /mnt/check/bin/sh 2>/dev/null || true
           echo "== GPU firmware"; ls -l /mnt/check/usr/local/share/firmware/ 2>/dev/null || true
+          echo "== Wi-Fi firmware"; ls -l /mnt/check/usr/local/share/firmware/wifi 2>/dev/null | head -40 || true
           sudo umount /mnt/check; sudo losetup -d "$DEV"
 
       - name: Pack and upload the root image
