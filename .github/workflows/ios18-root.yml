@@ -176,7 +176,9 @@ jobs:
         if: always() && (inputs.ssh_pubkey != '' || inputs.wifi_firmware_url != '')
         run: |
           set -euo pipefail
-          RAW=$(find -L research -name 'root.img' -type f | head -1)
+          # The GPU step may already have expanded a simg into <name>.img (not root.img), so
+          # look for any raw image first, exactly as the bgmtl/compositor/pack steps do.
+          RAW=$(find -L research -name '*.img' -type f -size +10G | head -1)
           if [ -z "$RAW" ]; then
             SIMG=$(find -L research -name '*.simg' -type f | head -1)
             [ -n "$SIMG" ] || { echo "no root image in research/"; exit 1; }
@@ -184,7 +186,8 @@ jobs:
             python3 tools/renegade/simg2img.py "$SIMG" "$RAW"
             rm -f "$SIMG"
           fi
-          [ -f "$RAW" ] || { echo "no root.img"; exit 1; }
+          [ -f "$RAW" ] || { echo "no root image"; exit 1; }
+          echo "RAW=$RAW"; ls -l "$RAW"
           MNT=/mnt/renegade-research/wififw-mnt
           mkdir -p "$MNT"
           sudo modprobe hfsplus
@@ -193,10 +196,11 @@ jobs:
           if [ -n "${{ inputs.ssh_pubkey }}" ]; then
             sudo mkdir -p "$MNT/private/var/root/.ssh"
             printf '%s\n' "${{ inputs.ssh_pubkey }}" > /tmp/authorized_keys
-            sudo install -m 600 -o 0 -g 0 /tmp/authorized_keys "$MNT/private/var/root/.ssh/authorized_keys"
-            sudo chmod 700 "$MNT/private/var/root/.ssh"
-            echo "== authorized_keys installed"
-            sudo cat "$MNT/private/var/root/.ssh/authorized_keys"
+            sudo cp /tmp/authorized_keys "$MNT/private/var/root/.ssh/authorized_keys"
+            sudo chown 0:0 "$MNT/private/var/root/.ssh/authorized_keys" || true
+            sudo chmod 600 "$MNT/private/var/root/.ssh/authorized_keys" || true
+            sudo chmod 700 "$MNT/private/var/root/.ssh" || true
+            echo "== authorized_keys installed"; sudo cat "$MNT/private/var/root/.ssh/authorized_keys"
           fi
           if [ -n "${{ inputs.wifi_firmware_url }}" ]; then
             mkdir -p /tmp/wififw
@@ -210,10 +214,9 @@ jobs:
                 *)             sudo cp "$a" "$MNT/usr/local/share/firmware/wifi/" ;;
               esac
             done
-            sudo chown -R 0:0 "$MNT/usr/local/share/firmware/wifi"
+            sudo chown -R 0:0 "$MNT/usr/local/share/firmware/wifi" || true
             sudo chmod 644 "$MNT/usr/local/share/firmware/wifi"/* || true
-            echo "== wifi firmware"
-            ls -l "$MNT/usr/local/share/firmware/wifi" | head -40
+            echo "== wifi firmware"; ls -l "$MNT/usr/local/share/firmware/wifi" | head -40
           fi
           sync
           sudo umount "$MNT"
@@ -259,7 +262,7 @@ jobs:
           sudo umount /mnt/comp
           sudo losetup -d "$DEV"
 
-      - name: Verify Chlorophyll, the ssh key and the GPU firmware in the image
+      - name: Verify Chlorophyll, the ssh key, the Wi-Fi and the GPU firmware in the image
         continue-on-error: true
         run: |
           set -uo pipefail
@@ -274,10 +277,10 @@ jobs:
           echo "== MercuryPosterExtension"; [ -f "$M" ] && (strings -a "$M" | grep -o 'bgmtl[^ ]*' | sort -u | head -5) || echo "absent"
           echo "== backboardd"; strings -a /mnt/check/usr/libexec/backboardd | grep -o 'bgmtl[^ ]*' | sort -u | head -5 || true
           echo "== bb arm/off"; ls -l /mnt/check/private/var/tmp/bgmtl-bb.* /mnt/check/private/var/tmp/bgmtl.defer 2>/dev/null || true
-          echo "== authorized_keys"; cat /mnt/check/private/var/root/.ssh/authorized_keys 2>/dev/null || true
+          echo "== authorized_keys"; cat /mnt/check/private/var/root/.ssh/authorized_keys 2>/dev/null || echo "absent"
           echo "== dropbear"; ls -l /mnt/check/usr/local/bin/dropbear /mnt/check/bin/sh 2>/dev/null || true
           echo "== GPU firmware"; ls -l /mnt/check/usr/local/share/firmware/ 2>/dev/null || true
-          echo "== Wi-Fi firmware"; ls -l /mnt/check/usr/local/share/firmware/wifi 2>/dev/null | head -40 || true
+          echo "== Wi-Fi firmware"; ls /mnt/check/usr/local/share/firmware/wifi 2>/dev/null | wc -l || true
           sudo umount /mnt/check; sudo losetup -d "$DEV"
 
       - name: Pack and upload the root image
