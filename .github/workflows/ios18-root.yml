@@ -37,6 +37,10 @@ concurrency:
 
 env:
   RENEGADE_TARGET: ios18
+  # berga_tools.py reads GITHUB_TOKEN/GH_TOKEN; unauthenticated api.github.com is 60/h per IP and
+  # shared runner IPs hit the 403 rate limit (the fetch-tools step failed that way once).
+  GITHUB_TOKEN: ${{ github.token }}
+  GH_TOKEN: ${{ github.token }}
 
 jobs:
   root:
